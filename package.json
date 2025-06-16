@@ -2,7 +2,7 @@
   "name": "claude-task-master-extension",
   "displayName": "Claude Task Master Visual Interface",
   "description": "Visual VS Code/Cursor interface for task-master-ai projects - provides tree view, progress tracking, and task management UI",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "publisher": "DevDreed",
   "license": "MIT",
   "icon": "images/claude-task-master-extension.png",
@@ -388,13 +388,28 @@
         },
         "claudeTaskMaster.enableLogging": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Enable console and output channel logging for debugging"
         },
         "claudeTaskMaster.enableFileLogging": {
           "type": "boolean",
           "default": false,
           "description": "Enable file logging to logs/extension.log (creates files in your project)"
+        },
+        "claudeTaskMaster.disableMCP": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable MCP integration (use file-based operations only)"
+        },
+        "claudeTaskMaster.preferCLIOnVersionMismatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefer CLI over MCP when version mismatches are detected between task-master installations"
+        },
+        "claudeTaskMaster.versionCheckInterval": {
+          "type": "number",
+          "default": 300000,
+          "description": "How often to check for version compatibility (in milliseconds, default 5 minutes)"
         }
       }
     }

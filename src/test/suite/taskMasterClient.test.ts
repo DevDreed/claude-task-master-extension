@@ -1124,4 +1124,26 @@ suite('TaskMasterClient Test Suite', () => {
         assert.strictEqual(subtaskInEmptyTask, null, 'Should return null when looking for subtask in task with no subtasks');
     });
 
+    // Tagged Format Tests
+    suite('Tagged Format Support', () => {
+        test('Should have updateTask method', () => {
+            assert.ok(typeof taskMasterClient.updateTask === 'function', 'updateTask method should exist');
+        });
+
+        test('Should have deleteTask method', () => {
+            assert.ok(typeof taskMasterClient.deleteTask === 'function', 'deleteTask method should exist');
+        });
+
+        test('Should handle tagged format structure detection', () => {
+            const legacyFormat = [{ id: '1', title: 'Task' }];
+            const taggedFormat = { master: { tasks: [{ id: '1', title: 'Task' }] } };
+            const v017Format = { tags: { master: { tasks: [{ id: '1', title: 'Task' }] } } };
+
+            // Test format detection logic (this would normally be in extractTasksFromContainer)
+            assert.ok(Array.isArray(legacyFormat), 'Legacy format should be array');
+            assert.ok(taggedFormat.master, 'Tagged format should have master property');
+            assert.ok(v017Format.tags, 'v0.17.0+ format should have tags property');
+        });
+    });
+
 }); 

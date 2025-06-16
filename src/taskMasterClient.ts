@@ -5,7 +5,20 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { log } from './logger';
 import { Task, TaskStatus } from './types';
-import { MCPClient } from './mcpClient';
+// Optional import to prevent blocking extension load
+let MCPClientClass: any = null;
+
+async function loadMCPClient() {
+    if (!MCPClientClass) {
+        try {
+            const mcpModule = await import('./mcpClient');
+            MCPClientClass = mcpModule.MCPClient;
+        } catch (error) {
+            throw new Error(`Failed to load MCP client: ${error}`);
+        }
+    }
+    return MCPClientClass;
+}
 import { TagManager } from './tagManager';
 
 const execAsync = promisify(exec);
@@ -14,17 +27,47 @@ export class TaskMasterClient {
     private taskmasterPath: string;
     private tasksPath: string;
     private configPath: string;
-    private mcpClient: MCPClient;
+    private mcpClient: any | null = null;
     private tagManager: TagManager;
     private taskMasterInstalled: boolean | null = null; // Cache installation status
+    private cliVersion: string | null = null; // Cache CLI version
+    private mcpVersion: string | null = null; // Cache MCP version
+    private versionCheckTimestamp: number = 0; // Track when version was last checked
 
     constructor(taskmasterPath: string) {
         this.taskmasterPath = taskmasterPath;
         this.tasksPath = path.join(taskmasterPath, 'tasks');
         this.configPath = path.join(taskmasterPath, 'config.json');
-        this.mcpClient = new MCPClient(taskmasterPath);
         this.tagManager = new TagManager(taskmasterPath);
         log(`TaskMasterClient initialized for path: ${taskmasterPath}`);
+    }
+
+    private async getMCPClient(): Promise<any> {
+        if (!this.mcpClient) {
+            try {
+                const MCPClientClass = await loadMCPClient();
+                // Pass the parent directory of .taskmaster as project root
+                const projectRoot = path.dirname(this.taskmasterPath);
+                this.mcpClient = new MCPClientClass(projectRoot);
+            } catch (error) {
+                log(`Failed to create MCP client: ${error}`);
+                throw new Error('MCP client unavailable');
+            }
+        }
+        return this.mcpClient;
+    }
+
+    /**
+     * Check if MCP functionality is available
+     */
+    async isMCPAvailable(): Promise<boolean> {
+        try {
+            const mcpClient = await this.getMCPClient();
+            return await mcpClient.canLoadMCP();
+        } catch (error) {
+            log(`MCP not available: ${error}`);
+            return false;
+        }
     }
 
     // Map Task Master status values to extension status values
@@ -60,14 +103,43 @@ export class TaskMasterClient {
 
     async getTasks(): Promise<Task[]> {
         try {
-            // Try MCP client first if available
-            if (await this.isMCPServerAvailable()) {
+            // Check version compatibility first
+            const versionCheck = await this.checkVersionCompatibility();
+            if (!versionCheck.compatible && versionCheck.warning) {
+                log(`⚠️  VERSION COMPATIBILITY ISSUE: ${versionCheck.warning}`);
+                this.showVersionWarningToUser(versionCheck);
+            }
+
+            // Log version information for debugging
+            this.logVersionDetails(versionCheck);
+
+            // Determine if we should skip MCP due to version mismatch
+            const shouldSkipMCP = !versionCheck.compatible && 
+                                  this.shouldPreferCLIOnVersionMismatch() &&
+                                  versionCheck.cliVersion !== null;
+
+            if (shouldSkipMCP) {
+                log(`🔄 FALLBACK: Skipping MCP due to version mismatch and user preference for CLI (CLI: ${versionCheck.cliVersion}, MCP: ${versionCheck.mcpVersion})`);
+            }
+
+            // Try MCP client first if available, compatible, and not skipped
+            if (!shouldSkipMCP && await this.isMCPServerAvailable()) {
                 try {
                     const currentTag = this.tagManager.getCurrentTag();
                     log(`Using MCP client to get tasks for tag: ${currentTag}`);
-                    return await this.mcpClient.getTasks(currentTag);
+                    const mcpClient = await this.getMCPClient();
+                    const mcpTasks = await mcpClient.getTasks(currentTag);
+                    
+                    // Validate MCP response
+                    const validatedTasks = this.validateTasksResponse(mcpTasks, 'MCP');
+                    if (validatedTasks) {
+                        this.logOperationResult('getTasks', 'MCP', true, `Retrieved ${validatedTasks.length} tasks`);
+                        return validatedTasks;
+                    }
+                    
+                    this.logOperationResult('getTasks', 'MCP', false, 'Task validation failed');
                 } catch (error) {
-                    log(`MCP getTasks failed, falling back to file reading: ${error}`);
+                    this.logOperationResult('getTasks', 'MCP', false, `${error}`);
                 }
             }
 
@@ -257,7 +329,7 @@ export class TaskMasterClient {
         }
         
         // Check if there are any tasks with dot notation IDs that need reorganization
-        const hasDotNotationTasks = tasks.some(task => task.id.includes('.'));
+        const hasDotNotationTasks = tasks.some(task => task.id?.toString().includes('.'));
         
         // If no dot notation tasks exist, return tasks as-is (already properly structured)
         if (!hasDotNotationTasks) {
@@ -585,7 +657,8 @@ export class TaskMasterClient {
                 try {
                     const currentTag = this.tagManager.getCurrentTag();
                     log(`Using MCP client to set task status for tag: ${currentTag}`);
-                    await this.mcpClient.setTaskStatus(taskId, status, currentTag);
+                    const mcpClient = await this.getMCPClient();
+                    await mcpClient.setTaskStatus(taskId, status, currentTag);
                     return;
                 } catch (error) {
                     log(`MCP setTaskStatus failed, falling back to file operations: ${error}`);
@@ -654,6 +727,62 @@ export class TaskMasterClient {
         }
     }
 
+    async updateTask(taskId: string, updates: Partial<Task>): Promise<void> {
+        log(`Updating task ${taskId} with properties: ${Object.keys(updates).join(', ')}`);
+        try {
+            // Try MCP client first if available (if it supports generic task updates)
+            if (await this.isMCPServerAvailable()) {
+                try {
+                    const currentTag = this.tagManager.getCurrentTag();
+                    log(`Using MCP client to update task for tag: ${currentTag}`);
+                    // const mcpClient = await this.getMCPClient();
+                    
+                    // For now, MCP client doesn't have a generic updateTask method
+                    // Fall back to file operations
+                    log(`MCP client doesn't support generic task updates, falling back to file operations`);
+                } catch (error) {
+                    log(`MCP updateTask failed, falling back to file operations: ${error}`);
+                }
+            }
+
+            // File operations
+            const tasksJsonPath = path.join(this.tasksPath, 'tasks.json');
+            if (!fs.existsSync(tasksJsonPath)) {
+                throw new Error('tasks.json not found');
+            }
+
+            const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
+            const tasksContainer = JSON.parse(tasksData);
+            const { tasks, isTaggedFormat, currentTag } = this.extractTasksFromContainer(tasksContainer);
+
+            let taskUpdated = false;
+
+            // Find and update the main task
+            for (const task of tasks) {
+                if (task.id.toString() === taskId.toString()) {
+                    // Apply all updates to the task
+                    Object.assign(task, updates);
+                    // Always update the timestamp
+                    task.updated = new Date().toISOString();
+                    taskUpdated = true;
+                    break;
+                }
+            }
+
+            if (taskUpdated) {
+                log(`Task ${taskId} found and updated. Writing back to tasks.json.`);
+                this.writeTasksToContainer(tasks, isTaggedFormat, currentTag, tasksContainer, tasksJsonPath);
+            } else {
+                log(`Task with ID ${taskId} not found for update.`);
+                throw new Error(`Task with ID ${taskId} not found.`);
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            log(`Error in updateTask for ${taskId}: ${errorMessage}`);
+            throw error;
+        }
+    }
+
     /**
      * Set the status of a specific subtask within a parent task
      * This method ensures we update the correct subtask by requiring both parent and subtask IDs
@@ -667,7 +796,8 @@ export class TaskMasterClient {
                     const currentTag = this.tagManager.getCurrentTag();
                     log(`Using MCP client to set subtask status for tag: ${currentTag}`);
                     // For MCP, we can use the existing setTaskStatus method since MCP handles the context
-                    await this.mcpClient.setTaskStatus(subtaskId, status, currentTag);
+                    const mcpClient = await this.getMCPClient();
+                    await mcpClient.setTaskStatus(subtaskId, status, currentTag);
                     return;
                 } catch (error) {
                     log(`MCP setSubtaskStatus failed, falling back to file operations: ${error}`);
@@ -1193,11 +1323,52 @@ export class TaskMasterClient {
     }
 
     /**
+     * Delete a main task
+     * @param taskId The ID of the main task to delete
+     */
+    async deleteTask(taskId: string): Promise<void> {
+        log(`Deleting main task ${taskId}.`);
+        try {
+            const tasksJsonPath = path.join(this.tasksPath, 'tasks.json');
+            if (!fs.existsSync(tasksJsonPath)) {
+                throw new Error('tasks.json not found');
+            }
+
+            const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
+            const tasksContainer = JSON.parse(tasksData);
+            const { tasks, isTaggedFormat, currentTag } = this.extractTasksFromContainer(tasksContainer);
+
+            const initialLength = tasks.length;
+            const filteredTasks = tasks.filter(task => task.id.toString() !== taskId.toString());
+                
+            if (filteredTasks.length < initialLength) {
+                log(`Main task ${taskId} deleted. Writing updates.`);
+                this.writeTasksToContainer(filteredTasks, isTaggedFormat, currentTag, tasksContainer, tasksJsonPath);
+            } else {
+                log(`Main task ${taskId} not found.`);
+                throw new Error(`Main task ${taskId} not found.`);
+            }
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            log(`Error deleting main task: ${errorMessage}`);
+            throw error;
+        }
+    }
+
+    /**
      * Check if MCP server is available by attempting to call a simple MCP function
      */
     async isMCPServerAvailable(): Promise<boolean> {
         try {
-            return await this.mcpClient.isAvailable();
+            // First check if we can even load MCP
+            if (!(await this.isMCPAvailable())) {
+                return false;
+            }
+            
+            // Then check if server is available
+            const mcpClient = await this.getMCPClient();
+            return await mcpClient.isAvailable();
         } catch (error) {
             log(`MCP server check failed: ${error}`);
             return false;
@@ -1205,28 +1376,314 @@ export class TaskMasterClient {
     }
 
     /**
-     * Check if task-master command is available (with caching)
+     * Get version check interval from configuration
+     */
+    private getVersionCheckInterval(): number {
+        try {
+            const vscode = require('vscode');
+            const config = vscode.workspace.getConfiguration('claudeTaskMaster');
+            return config.get('versionCheckInterval', 300000); // Default 5 minutes
+        } catch (error) {
+            return 300000; // Default 5 minutes if VS Code API not available
+        }
+    }
+
+    /**
+     * Check if CLI should be preferred over MCP on version mismatch
+     */
+    private shouldPreferCLIOnVersionMismatch(): boolean {
+        try {
+            const vscode = require('vscode');
+            const config = vscode.workspace.getConfiguration('claudeTaskMaster');
+            return config.get('preferCLIOnVersionMismatch', true);
+        } catch (error) {
+            return true; // Default to preferring CLI if VS Code API not available
+        }
+    }
+
+    /**
+     * Check if task-master command is available and get version (with caching)
      */
     private async isTaskMasterInstalled(): Promise<boolean> {
-        // Return cached result if available
-        if (this.taskMasterInstalled !== null) {
+        // Return cached result if available and recent (cache based on config)
+        const now = Date.now();
+        const cacheInterval = this.getVersionCheckInterval();
+        if (this.taskMasterInstalled !== null && (now - this.versionCheckTimestamp) < cacheInterval) {
             return this.taskMasterInstalled;
         }
 
         try {
             // Try to run task-master --version to check if it's installed
-            await execAsync('task-master --version', {
+            const { stdout } = await execAsync('task-master --version', {
                 cwd: this.taskmasterPath,
                 timeout: 5000 // 5 second timeout for version check
             });
+            
+            this.cliVersion = stdout.trim();
             this.taskMasterInstalled = true;
-            log(`task-master command is available`);
+            this.versionCheckTimestamp = now;
+            log(`task-master command is available, version: ${this.cliVersion}`);
             return true;
         } catch (error) {
             this.taskMasterInstalled = false;
+            this.cliVersion = null;
+            this.versionCheckTimestamp = now;
             log(`task-master command not available: ${error}`);
             return false;
         }
+    }
+
+    /**
+     * Get CLI version if available
+     */
+    async getCLIVersion(): Promise<string | null> {
+        await this.isTaskMasterInstalled();
+        return this.cliVersion;
+    }
+
+    /**
+     * Get MCP server version if available
+     */
+    async getMCPVersion(): Promise<string | null> {
+        try {
+            if (await this.isMCPServerAvailable()) {
+                const mcpClient = await this.getMCPClient();
+                // Try to get version from MCP server
+                // This would depend on the MCP server implementing a version endpoint
+                const result = await mcpClient.getVersion?.();
+                this.mcpVersion = result || 'unknown';
+                return this.mcpVersion;
+            }
+        } catch (error) {
+            log(`Could not get MCP version: ${error}`);
+        }
+        return null;
+    }
+
+    /**
+     * Validate and sanitize tasks response from any source (MCP/CLI/file)
+     */
+    private validateTasksResponse(tasks: any, source: string): Task[] | null {
+        try {
+            if (!tasks) {
+                log(`${source} returned null/undefined tasks`);
+                return null;
+            }
+
+            if (!Array.isArray(tasks)) {
+                log(`${source} returned non-array tasks: ${typeof tasks}`);
+                return null;
+            }
+
+            // Validate each task has required fields
+            const validTasks: Task[] = [];
+            for (let i = 0; i < tasks.length; i++) {
+                const task = tasks[i];
+                
+                if (!task) {
+                    log(`${source} task ${i} is null/undefined, skipping`);
+                    continue;
+                }
+
+                if (!task.id) {
+                    log(`${source} task ${i} missing ID, skipping`);
+                    continue;
+                }
+
+                if (!task.title) {
+                    log(`${source} task ${i} (${task.id}) missing title, skipping`);
+                    continue;
+                }
+
+                // Sanitize and normalize the task
+                const sanitizedTask: Task = {
+                    id: String(task.id), // Ensure ID is string
+                    title: String(task.title),
+                    description: task.description ? String(task.description) : '',
+                    details: task.details ? String(task.details) : '',
+                    status: this.normalizeStatus(task.status || 'pending'),
+                    priority: task.priority || 'medium',
+                    category: task.category || '',
+                    created: task.created || new Date().toISOString(),
+                    updated: task.updated || new Date().toISOString(),
+                    dependencies: Array.isArray(task.dependencies) 
+                        ? task.dependencies.map((dep: any) => String(dep))
+                        : [],
+                    subtasks: []
+                };
+
+                // Recursively validate and sanitize subtasks
+                if (task.subtasks && Array.isArray(task.subtasks)) {
+                    const validatedSubtasks = this.validateTasksResponse(task.subtasks, `${source} subtasks`);
+                    if (validatedSubtasks) {
+                        sanitizedTask.subtasks = validatedSubtasks;
+                    }
+                }
+
+                validTasks.push(sanitizedTask);
+            }
+
+            log(`${source} validation: ${validTasks.length}/${tasks.length} tasks passed validation`);
+            return validTasks;
+        } catch (error) {
+            log(`Error validating ${source} tasks response: ${error}`);
+            return null;
+        }
+    }
+
+
+    /**
+     * Log detailed version information for debugging
+     */
+    private logVersionDetails(versionCheck: { 
+        compatible: boolean; 
+        cliVersion: string | null; 
+        mcpVersion: string | null; 
+        warning?: string 
+    }): void {
+        log(`📊 VERSION INFO:`);
+        log(`   - CLI Version: ${versionCheck.cliVersion || 'Not available'}`);
+        log(`   - MCP Version: ${versionCheck.mcpVersion || 'Not available'}`);
+        log(`   - Compatible: ${versionCheck.compatible ? '✅' : '❌'}`);
+        log(`   - Prefer CLI on mismatch: ${this.shouldPreferCLIOnVersionMismatch() ? '✅' : '❌'}`);
+        
+        if (versionCheck.warning) {
+            log(`   - Warning: ${versionCheck.warning}`);
+        }
+    }
+
+    /**
+     * Show version warning to user via VS Code notification
+     */
+    private showVersionWarningToUser(versionCheck: { 
+        compatible: boolean; 
+        cliVersion: string | null; 
+        mcpVersion: string | null; 
+        warning?: string 
+    }): void {
+        try {
+            const vscode = require('vscode');
+            
+            if (!versionCheck.compatible && versionCheck.warning) {
+                const message = `Task Master Version Mismatch: ${versionCheck.warning}`;
+                const actions = ['Update CLI', 'Use CLI Only', 'Ignore'];
+                
+                vscode.window.showWarningMessage(message, ...actions).then((selection: string) => {
+                    switch (selection) {
+                        case 'Update CLI':
+                            vscode.env.openExternal(vscode.Uri.parse('https://www.npmjs.com/package/task-master-ai'));
+                            break;
+                        case 'Use CLI Only':
+                            const config = vscode.workspace.getConfiguration('claudeTaskMaster');
+                            config.update('disableMCP', true, vscode.ConfigurationTarget.Workspace);
+                            vscode.window.showInformationMessage('MCP disabled for this workspace. Restart VS Code to apply changes.');
+                            break;
+                        case 'Ignore':
+                            // User chose to ignore
+                            break;
+                    }
+                });
+                
+                log(`🔔 Showed version warning notification to user: ${message}`);
+            }
+        } catch (error) {
+            log(`Could not show version warning to user: ${error}`);
+        }
+    }
+
+    /**
+     * Log operation results with version context
+     */
+    private logOperationResult(operation: string, source: 'MCP' | 'CLI' | 'File', success: boolean, details?: string): void {
+        const emoji = success ? '✅' : '❌';
+        const versionInfo = source === 'MCP' ? this.mcpVersion : 
+                           source === 'CLI' ? this.cliVersion : 'N/A';
+        
+        log(`${emoji} ${operation.toUpperCase()} via ${source} (v${versionInfo || 'unknown'}): ${success ? 'SUCCESS' : 'FAILED'}`);
+        
+        if (details) {
+            log(`   Details: ${details}`);
+        }
+        
+        if (!success && source === 'MCP') {
+            log(`   💡 Consider using CLI fallback or updating versions to match`);
+        }
+    }
+
+    /**
+     * Check if there's a version mismatch between CLI and MCP that could cause issues
+     */
+    async checkVersionCompatibility(): Promise<{ 
+        compatible: boolean; 
+        cliVersion: string | null; 
+        mcpVersion: string | null; 
+        warning?: string 
+    }> {
+        const cliVersion = await this.getCLIVersion();
+        const mcpVersion = await this.getMCPVersion();
+        
+        // If we can't get versions, assume compatible but warn
+        if (!cliVersion && !mcpVersion) {
+            return {
+                compatible: true,
+                cliVersion: null,
+                mcpVersion: null,
+                warning: 'Unable to determine version compatibility - both CLI and MCP unavailable'
+            };
+        }
+
+        if (!cliVersion) {
+            return {
+                compatible: true,
+                cliVersion: null,
+                mcpVersion,
+                warning: 'CLI not available, using MCP only'
+            };
+        }
+
+        if (!mcpVersion) {
+            return {
+                compatible: true,
+                cliVersion,
+                mcpVersion: null,
+                warning: 'MCP not available, using CLI only'
+            };
+        }
+
+        // Simple version comparison (assumes semver format)
+        const parseCLIVersion = (v: string) => {
+            const match = v.match(/(\d+)\.(\d+)\.(\d+)/);
+            return match ? [parseInt(match[1]!), parseInt(match[2]!), parseInt(match[3]!)] : [0, 0, 0];
+        };
+
+        const cliVersionParts = parseCLIVersion(cliVersion);
+        const mcpVersionParts = parseCLIVersion(mcpVersion);
+
+        // Check for major version differences
+        if (cliVersionParts[0] !== mcpVersionParts[0]) {
+            return {
+                compatible: false,
+                cliVersion,
+                mcpVersion,
+                warning: `Major version mismatch: CLI v${cliVersion} vs MCP v${mcpVersion}. This may cause data inconsistencies.`
+            };
+        }
+
+        // Check for minor version differences
+        if (Math.abs(cliVersionParts[1]! - mcpVersionParts[1]!) > 1) {
+            return {
+                compatible: false,
+                cliVersion,
+                mcpVersion,
+                warning: `Significant version difference: CLI v${cliVersion} vs MCP v${mcpVersion}. Consider updating both to the same version.`
+            };
+        }
+
+        return {
+            compatible: true,
+            cliVersion,
+            mcpVersion
+        };
     }
 
     /**
@@ -1285,7 +1742,8 @@ export class TaskMasterClient {
         if (!useCLI && await this.isMCPServerAvailable()) {
             // Try MCP first
             try {
-                await this.mcpClient.addTask(task, targetTag);
+                const mcpClient = await this.getMCPClient();
+                await mcpClient.addTask(task, targetTag);
                 log(`Task added via MCP: ${task.title} (tag: ${targetTag})`);
                 return;
             } catch (error) {
@@ -1403,7 +1861,8 @@ export class TaskMasterClient {
         } else {
             // Try MCP expand functionality
             try {
-                await this.mcpClient.expandTask(taskId, force, targetTag);
+                const mcpClient = await this.getMCPClient();
+                await mcpClient.expandTask(taskId, force, targetTag);
                 log(`Task expanded via MCP: ${taskId} (tag: ${targetTag})`);
             } catch (error) {
                 throw new Error(`MCP server expand functionality failed: ${error}`);
@@ -1526,7 +1985,8 @@ export class TaskMasterClient {
         try {
             // Try MCP client first if available
             if (await this.isMCPServerAvailable()) {
-                await this.mcpClient.switchTag(tagName);
+                const mcpClient = await this.getMCPClient();
+                await mcpClient.switchTag(tagName);
             }
             
             // Update local tag manager

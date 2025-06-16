@@ -1,9 +1,44 @@
 import { log } from './logger';
 import { Task, TaskStatus } from './types';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
+
+// Dynamic imports for MCP SDK to prevent blocking extension load
+let MCPClientClass: any = null;
+let MCPStdioClientTransportClass: any = null;
+let mcpImportError: string | null = null;
+
+// Lazy load MCP SDK with error handling
+async function loadMCPSDK() {
+    if (MCPClientClass && MCPStdioClientTransportClass) {
+        return { Client: MCPClientClass, StdioClientTransport: MCPStdioClientTransportClass };
+    }
+    
+    if (mcpImportError) {
+        throw new Error(`MCP SDK previously failed to load: ${mcpImportError}`);
+    }
+    
+    try {
+        // Use absolute path resolution to avoid export map issues
+        const path = require('path');
+        const clientPath = path.resolve(__dirname, '../node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js');
+        const stdioPath = path.resolve(__dirname, '../node_modules/@modelcontextprotocol/sdk/dist/cjs/client/stdio.js');
+        
+        const clientModule = require(clientPath);
+        const stdioModule = require(stdioPath);
+        
+        MCPClientClass = clientModule.Client;
+        MCPStdioClientTransportClass = stdioModule.StdioClientTransport;
+        
+        log('MCP SDK loaded successfully');
+        return { Client: MCPClientClass, StdioClientTransport: MCPStdioClientTransportClass };
+    } catch (error) {
+        mcpImportError = error instanceof Error ? error.message : String(error);
+        log(`Failed to load MCP SDK: ${mcpImportError}`);
+        throw new Error(`MCP SDK not available: ${mcpImportError}`);
+    }
+}
 
 /**
  * MCP Client for integrating with task-master-ai MCP tools
@@ -12,13 +47,31 @@ import * as path from 'path';
 export class MCPClient {
     private projectRoot: string;
     private currentTag: string = 'master';
-    private client: Client | null = null;
-    private transport: StdioClientTransport | null = null;
+    private client: any | null = null;
+    private transport: any | null = null;
     private isConnected: boolean = false;
 
     constructor(projectRoot: string) {
         this.projectRoot = projectRoot;
         log(`MCPClient initialized for project: ${projectRoot}`);
+    }
+
+    /**
+     * Find the best available task-master-ai command
+     */
+    private async findTaskMasterCommand(): Promise<{ command: string; args: string[] }> {
+        // First try globally installed task-master-ai
+        try {
+            execSync('task-master-ai --version', { stdio: 'pipe' });
+            log('Using globally installed task-master-ai');
+            return { command: 'task-master-ai', args: [] };
+        } catch (error) {
+            log('Global task-master-ai not found, falling back to npx');
+        }
+
+        // Fallback to npx (but warn about potential issues)
+        log('Warning: Using npx task-master-ai may cause MCP connection issues. Consider installing globally: npm install -g task-master-ai');
+        return { command: 'npx', args: ['task-master-ai'] };
     }
 
     /**
@@ -47,24 +100,48 @@ export class MCPClient {
         }
 
         try {
-            // Create MCP client
+            // Dynamically load MCP SDK
+            const { Client, StdioClientTransport } = await loadMCPSDK();
+            
+            // Create MCP client with basic configuration
             this.client = new Client({
                 name: 'task-master-extension',
-                version: '1.0.0'
+                version: '1.2.1'
             });
 
+            // Try to find the best task-master-ai command
+            const taskMasterCommand = await this.findTaskMasterCommand();
+            
             // Create stdio transport for task-master-ai CLI
-            this.transport = new StdioClientTransport({
-                command: 'task-master-ai',
-                args: ['--mcp'],
+            const transportOptions = {
+                command: taskMasterCommand.command,
+                args: [...taskMasterCommand.args, '--mcp'],
+                cwd: this.projectRoot, // Back to using project root
                 env: {
                     ...process.env,
-                    TASKMASTER_PROJECT_ROOT: this.projectRoot
+                    TASKMASTER_PROJECT_ROOT: this.projectRoot,
+                    // Try to suppress the FastMCP warning
+                    FASTMCP_DEBUG: 'false'
                 }
-            });
+            };
+            
+            log(`Transport options: ${JSON.stringify(transportOptions, null, 2)}`);
+            this.transport = new StdioClientTransport(transportOptions);
 
-            // Connect to the MCP server
-            await this.client.connect(this.transport);
+            // Connect to the MCP server with timeout and detailed logging
+            log(`Attempting to connect to MCP server using: ${taskMasterCommand.command} ${taskMasterCommand.args.join(' ')} --mcp`);
+            log(`Working directory: ${this.projectRoot}`);
+            
+            const connectPromise = this.client.connect(this.transport);
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('MCP connection timeout after 5 seconds')), 5000)
+            );
+            
+            // Add additional error handling
+            this.transport.onclose = () => log('MCP transport closed unexpectedly');
+            this.transport.onerror = (error: any) => log(`MCP transport error: ${error}`);
+            
+            await Promise.race([connectPromise, timeoutPromise]);
             this.isConnected = true;
             log('MCP client connected successfully');
         } catch (error) {
@@ -84,12 +161,48 @@ export class MCPClient {
                 return false;
             }
 
-            // Try to ping the server
-            await this.client.ping();
+            // Try to ping the server with timeout
+            const pingPromise = this.client.ping();
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('MCP ping timeout')), 3000)
+            );
+            
+            await Promise.race([pingPromise, timeoutPromise]);
             return true;
         } catch (error) {
             log(`MCP server not available: ${error}`);
             this.isConnected = false;
+            return false;
+        }
+    }
+
+    /**
+     * Check if MCP SDK can be loaded (without trying to connect)
+     */
+    async canLoadMCP(): Promise<boolean> {
+        // Check if MCP is disabled via environment variable
+        if (process.env['CLAUDE_TASK_MASTER_DISABLE_MCP'] === 'true') {
+            log('MCP disabled via environment variable CLAUDE_TASK_MASTER_DISABLE_MCP');
+            return false;
+        }
+
+        // Check if MCP is disabled via VS Code configuration
+        try {
+            const vscode = require('vscode');
+            const config = vscode.workspace.getConfiguration('claudeTaskMaster');
+            if (config.get('disableMCP', false)) {
+                log('MCP disabled via VS Code configuration');
+                return false;
+            }
+        } catch (error) {
+            // VS Code API not available (probably in tests), continue
+        }
+
+        try {
+            await loadMCPSDK();
+            return true;
+        } catch (error) {
+            log(`MCP SDK not loadable: ${error}`);
             return false;
         }
     }
@@ -114,8 +227,8 @@ export class MCPClient {
             // Extract text content from the result
             if (result.content && Array.isArray(result.content)) {
                 const textContent = result.content
-                    .filter(item => item.type === 'text')
-                    .map(item => item.text)
+                    .filter((item: any) => item.type === 'text')
+                    .map((item: any) => item.text)
                     .join('\n');
                 
                 // Try to parse as JSON if possible
@@ -134,24 +247,103 @@ export class MCPClient {
     }
 
     /**
+     * Normalize a single task's IDs to strings
+     */
+    private normalizeTaskId(task: any): Task | null {
+        if (!task) {
+            return null;
+        }
+
+        return {
+            ...task,
+            id: task.id?.toString() || '', // Convert ID to string
+            // Also normalize dependency IDs if they exist
+            dependencies: task.dependencies?.map((dep: any) => dep?.toString()) || [],
+            // Recursively normalize subtask IDs
+            subtasks: task.subtasks ? this.normalizeTaskIds(task.subtasks) : []
+        };
+    }
+
+    /**
+     * Normalize task IDs to strings to ensure compatibility with tree view operations
+     * The MCP server might return numeric IDs, but the extension expects string IDs
+     */
+    private normalizeTaskIds(tasks: any[]): Task[] {
+        if (!Array.isArray(tasks)) {
+            return [];
+        }
+
+        return tasks.map(task => this.normalizeTaskId(task)).filter((task): task is Task => task !== null);
+    }
+
+    /**
      * Get all tasks with tag support
      */
     async getTasks(tag?: string): Promise<Task[]> {
         const currentTag = tag || await this.getCurrentTag();
         
-        const result = await this.callMCPTool('get_tasks', {
+        // Try different parameter combinations to see what works
+        log(`Trying get_tasks with projectRoot: ${this.projectRoot}, tag: ${currentTag}`);
+        let result = await this.callMCPTool('get_tasks', {
             projectRoot: this.projectRoot,
             tag: currentTag,
             withSubtasks: true
         });
+        
+        log(`First attempt result: ${JSON.stringify(result)}`);
+        
+        // Check if result is empty (could be null, undefined, empty array, or empty object)
+        const isEmpty = (res: any) => {
+            if (!res) {return true;}
+            if (Array.isArray(res) && res.length === 0) {return true;}
+            if (typeof res === 'object' && Object.keys(res).length === 0) {return true;}
+            if (res.tagInfo && res.tagInfo.tasks && Array.isArray(res.tagInfo.tasks) && res.tagInfo.tasks.length === 0) {return true;}
+            return false;
+        };
+        
+        // If that returns empty, try without projectRoot
+        if (isEmpty(result)) {
+            log(`First attempt returned empty, trying without projectRoot parameter`);
+            result = await this.callMCPTool('get_tasks', {
+                tag: currentTag,
+                withSubtasks: true
+            });
+            log(`Second attempt result: ${JSON.stringify(result)}`);
+        }
+        
+        // If still empty, try just with tag
+        if (isEmpty(result)) {
+            log(`Second attempt returned empty, trying with just tag parameter`);
+            result = await this.callMCPTool('get_tasks', {
+                tag: currentTag
+            });
+            log(`Third attempt result: ${JSON.stringify(result)}`);
+        }
+        
+        // If still empty, try with no parameters
+        if (isEmpty(result)) {
+            log(`Third attempt returned empty, trying with no parameters`);
+            result = await this.callMCPTool('get_tasks', {});
+            log(`Fourth attempt result: ${JSON.stringify(result)}`);
+        }
 
-        // Handle the tagged format response
+        // Handle the MCP server response format
+        if (result && result.data && result.data.tasks && Array.isArray(result.data.tasks)) {
+            log(`Successfully parsed ${result.data.tasks.length} tasks from MCP response`);
+            log(`Before normalization - sample task ID type: ${typeof result.data.tasks[0]?.id}`);
+            const normalizedTasks = this.normalizeTaskIds(result.data.tasks);
+            log(`After normalization - sample task ID type: ${typeof normalizedTasks[0]?.id}`);
+            return normalizedTasks;
+        }
+        
+        // Handle the tagged format response (alternative format)
         if (result && result.tagInfo && result.tagInfo.tasks) {
-            return result.tagInfo.tasks;
+            return this.normalizeTaskIds(result.tagInfo.tasks);
         }
         
         // Fallback for direct tasks array
-        return Array.isArray(result) ? result : [];
+        const tasks = Array.isArray(result) ? result : [];
+        return this.normalizeTaskIds(tasks);
     }
 
     /**
@@ -166,7 +358,7 @@ export class MCPClient {
             tag: currentTag
         });
 
-        return result || null;
+        return this.normalizeTaskId(result);
     }
 
     /**
@@ -180,7 +372,7 @@ export class MCPClient {
             tag: currentTag
         });
 
-        return result || null;
+        return this.normalizeTaskId(result);
     }
 
     /**

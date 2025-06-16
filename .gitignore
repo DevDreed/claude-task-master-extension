@@ -247,3 +247,4 @@ logs
 .vscode
 # OS specific
 # Task files
+scripts/generate-vscodeignore.js

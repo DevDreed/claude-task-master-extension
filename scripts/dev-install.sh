@@ -4,7 +4,7 @@
 # This script compiles, packages, and installs the extension automatically
 
 EXTENSION_NAME="claude-task-master-extension"
-VSIX_FILE="$EXTENSION_NAME-0.1.0.vsix"
+VSIX_FILE="$EXTENSION_NAME-1.2.1.vsix"
 
 echo "🚀 Starting automatic extension rebuild and install..."
 echo ""
@@ -21,7 +21,7 @@ fi
 
 # Step 2: Package the extension
 echo "📦 Step 2: Packaging extension..."
-if npm run package; then
+if npx vsce package; then
     echo "✅ Extension packaged successfully"
     echo ""
 else

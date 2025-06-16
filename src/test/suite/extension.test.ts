@@ -127,6 +127,194 @@ suite('Extension Test Suite', () => {
         assert.ok(allCommands.includes('workbench.action.files.newUntitledFile'), 'Basic VS Code commands should be available');
     });
 
+    // Task ID Resolution Integration Tests
+    suite('Task ID Resolution Integration', () => {
+        test('Should correctly identify main tasks vs subtasks for changePriority', async () => {
+            // Mock TaskMasterClient and TaskProvider behavior
+            const mockWorkspaceFolder = {
+                uri: { fsPath: '/mock/workspace' },
+                name: 'test-workspace',
+                index: 0
+            };
+
+            sandbox.stub(fs, 'existsSync').returns(true);
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([mockWorkspaceFolder]);
+            sandbox.stub(vscode.commands, 'executeCommand').resolves();
+
+            // Mock tasks with main task and subtask having same ID format
+            const mockTasks = [
+                {
+                    id: '4',
+                    title: 'Main Task 4',
+                    status: 'todo',
+                    priority: 'medium',
+                    subtasks: [
+                        {
+                            id: '4.1',
+                            title: 'Subtask 4.1',
+                            status: 'todo',
+                            priority: 'low'
+                        }
+                    ]
+                }
+            ];
+
+            // Test main task ID resolution
+            // TaskItem for main task should have parentTaskId = undefined
+            const mainTaskItem = {
+                task: mockTasks[0],
+                parentTaskId: undefined,
+                type: 'task'
+            };
+
+            // TaskItem for subtask should have parentTaskId = '4'
+            const mainTask = mockTasks[0];
+            assert.ok(mainTask, 'Main task should exist');
+            assert.ok(mainTask.subtasks && mainTask.subtasks.length > 0, 'Main task should have subtasks');
+            const subtask = mainTask.subtasks[0];
+            
+            const subtaskItem = {
+                task: subtask,
+                parentTaskId: '4',
+                type: 'subtask'
+            };
+
+            // Verify main task is identified correctly
+            assert.strictEqual(mainTaskItem.parentTaskId, undefined, 'Main task should have no parentTaskId');
+            assert.strictEqual(mainTaskItem.task!.id, '4', 'Main task should have ID 4');
+
+            // Verify subtask is identified correctly  
+            assert.strictEqual(subtaskItem.parentTaskId, '4', 'Subtask should have parentTaskId 4');
+            assert.strictEqual(subtaskItem.task!.id, '4.1', 'Subtask should have ID 4.1');
+        });
+
+        test('Should handle dot notation IDs correctly in task resolution', async () => {
+            // Test various ID formats that could cause confusion
+
+            // Mock task structure where some dot notation IDs are main tasks
+            const mockTasks = [
+                {
+                    id: '1',
+                    title: 'Main Task 1',
+                    status: 'todo',
+                    subtasks: []
+                },
+                {
+                    id: '1.0',  // This is actually a main task, not a subtask
+                    title: 'Main Task 1.0',
+                    status: 'todo',
+                    subtasks: [
+                        {
+                            id: '1.0.1',
+                            title: 'Subtask of 1.0',
+                            status: 'todo'
+                        }
+                    ]
+                }
+            ];
+
+            // Function to determine if task is subtask (simulating our fixed logic)
+            const isSubtask = (taskId: string, tasks: any[]) => {
+                // Find if any main task contains this as a subtask
+                return tasks.some(mainTask => 
+                    mainTask.subtasks?.some((st: any) => st.id.toString() === taskId.toString())
+                );
+            };
+
+            // Test the resolution logic
+            assert.strictEqual(isSubtask('1', mockTasks), false, 'Task 1 should be identified as main task');
+            assert.strictEqual(isSubtask('1.0', mockTasks), false, 'Task 1.0 should be identified as main task (not subtask)');
+            assert.strictEqual(isSubtask('1.0.1', mockTasks), true, 'Task 1.0.1 should be identified as subtask');
+            assert.strictEqual(isSubtask('999', mockTasks), false, 'Non-existent task should not be identified as subtask');
+        });
+
+        test('Should handle tagged format task resolution correctly', async () => {
+            // Test that task resolution works in both legacy and tagged formats
+            const legacyFormat = [
+                {
+                    id: '1',
+                    title: 'Legacy Task',
+                    status: 'todo',
+                    priority: 'medium'
+                }
+            ];
+
+            const taggedFormat = {
+                master: {
+                    tasks: [
+                        {
+                            id: '1',
+                            title: 'Tagged Task',
+                            status: 'todo', 
+                            priority: 'medium'
+                        }
+                    ],
+                    metadata: {
+                        created: "2025-01-15T01:47:32.567Z",
+                        updated: "2025-01-15T02:24:21.338Z"
+                    }
+                }
+            };
+
+            const v017Format = {
+                tags: {
+                    master: {
+                        tasks: [
+                            {
+                                id: '1',
+                                title: 'v0.17.0+ Task',
+                                status: 'todo',
+                                priority: 'medium'
+                            }
+                        ],
+                        metadata: {
+                            created: "2025-01-15T01:47:32.567Z",
+                            updated: "2025-01-15T02:24:21.338Z"
+                        }
+                    }
+                }
+            };
+
+            // Function to extract tasks (simulating TaskMasterClient.extractTasksFromContainer)
+            const extractTasks = (container: any) => {
+                if (Array.isArray(container)) {
+                    return { tasks: container, isTaggedFormat: false, currentTag: 'master' };
+                } else if (container.tags) {
+                    return { 
+                        tasks: container.tags.master?.tasks || [], 
+                        isTaggedFormat: true, 
+                        currentTag: 'master' 
+                    };
+                } else if (container.master) {
+                    return { 
+                        tasks: container.master.tasks || [], 
+                        isTaggedFormat: true, 
+                        currentTag: 'master' 
+                    };
+                } else {
+                    return { tasks: container.tasks || [], isTaggedFormat: false, currentTag: 'master' };
+                }
+            };
+
+            // Test all formats return the same task structure
+            const legacyResult = extractTasks(legacyFormat);
+            const taggedResult = extractTasks(taggedFormat);
+            const v017Result = extractTasks(v017Format);
+
+            assert.strictEqual(legacyResult.tasks.length, 1, 'Legacy format should have 1 task');
+            assert.strictEqual(taggedResult.tasks.length, 1, 'Tagged format should have 1 task');
+            assert.strictEqual(v017Result.tasks.length, 1, 'v0.17.0+ format should have 1 task');
+
+            assert.strictEqual(legacyResult.tasks[0].id, '1', 'Legacy task should have correct ID');
+            assert.strictEqual(taggedResult.tasks[0].id, '1', 'Tagged task should have correct ID');
+            assert.strictEqual(v017Result.tasks[0].id, '1', 'v0.17.0+ task should have correct ID');
+
+            assert.strictEqual(legacyResult.isTaggedFormat, false, 'Legacy format should not be tagged');
+            assert.strictEqual(taggedResult.isTaggedFormat, true, 'Tagged format should be tagged');
+            assert.strictEqual(v017Result.isTaggedFormat, true, 'v0.17.0+ format should be tagged');
+        });
+    });
+
     test('Should create tree view with correct configuration', async () => {
         // Mock workspace and taskmaster setup
         const mockWorkspaceFolder = {

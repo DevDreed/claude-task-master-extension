@@ -5,6 +5,27 @@ All notable changes to the Claude Task Master Visual Interface extension will be
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2025-06-16 - Bug Fixes and Stability Improvements
+
+### 🔧 Bug Fixes
+- **Core Extension Stability**: Improved error handling and connection reliability
+- **MCP Client Enhancements**: Enhanced MCP protocol communication and error recovery
+- **Task Provider Optimizations**: Better task tree rendering and state management
+- **Test Suite Updates**: Enhanced test coverage and reliability
+
+### 🛠️ Technical Improvements
+- **Extension Lifecycle**: Improved extension activation and deactivation handling
+- **Client Communication**: Enhanced MCP client stability and connection management
+- **Task Management**: Optimized task provider performance and reliability
+- **Development Tools**: Updated build scripts and development installation process
+
+### 📋 Configuration Updates
+- **Build Configuration**: Enhanced build scripts for better development experience
+- **VS Code Settings**: Updated extension configuration and ignore patterns
+- **Package Dependencies**: Updated and optimized package dependencies
+
+---
+
 ## [1.2.0] - 2025-06-15 - Complete Task Master v0.17.0 Tagged Format Support
 
 ### 🎉 Major Features Added

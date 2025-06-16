@@ -550,6 +550,9 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
         log('Fetching tasks from TaskMasterClient.');
         const tasks = await this.taskMasterClient.getTasks();
         log(`Fetched ${tasks.length} tasks.`);
+        if (tasks.length > 0) {
+            log(`First task ID type: ${typeof tasks[0]?.id}, value: ${tasks[0]?.id}`);
+        }
         return tasks;
     }
 
@@ -834,18 +837,21 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
             // Return the next recommended task when section is expanded
             const nextTask = await this.getNextRecommendedTask(tasks);
             if (nextTask) {
-                // Determine if this is a task or subtask
-                const isSubtask = nextTask.id.includes('.');
-                const taskType = isSubtask ? 'Subtask' : 'Task';
-                
+                // Determine if this is a task or subtask by checking if it's actually nested under another task
                 let parentTaskId: string | undefined;
-                if (isSubtask) {
-                    // Find the parent task for this subtask
-                    const parentTask = tasks.find(task => 
-                        task.subtasks?.some(st => st.id === nextTask.id)
-                    );
-                    parentTaskId = parentTask?.id.toString();
+                let isSubtask = false;
+                
+                // Find the parent task for this potential subtask
+                const parentTask = tasks.find(task => 
+                    task.subtasks?.some(st => st.id === nextTask.id)
+                );
+                
+                if (parentTask) {
+                    isSubtask = true;
+                    parentTaskId = parentTask.id.toString();
                 }
+                
+                const taskType = isSubtask ? 'Subtask' : 'Task';
                 
                 const nextTaskItem = new TaskItem(
                     `${taskType} ${nextTask.id}: ${nextTask.title}`,
@@ -1003,7 +1009,19 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
         log(`Returning ${filteredTasks.length} task items for category '${categoryLabel}'.`);
 
         return filteredTasks.map(task => {
-            const isSubtask = task.id.includes('.');
+            // Check if this task is actually a subtask by looking for a parent task that contains it
+            let parentTaskId: string | undefined;
+            let isSubtask = false;
+            
+            // Search for a parent task that contains this task as a subtask
+            const parentTask = tasks.find(mainTask => 
+                mainTask.subtasks?.some(st => st.id.toString() === task.id.toString())
+            );
+            
+            if (parentTask) {
+                isSubtask = true;
+                parentTaskId = parentTask.id.toString();
+            }
             
             // Set collapsible state based on whether task has subtasks
             let collapsibleState = vscode.TreeItemCollapsibleState.None;
@@ -1013,19 +1031,10 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
                 collapsibleState = isExpanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed;
             }
             
-            // Calculate nesting level based on task ID (number of dots)
-            const nestingLevel = task.id.split('.').length - 1;
+            // Calculate nesting level based on task ID (number of dots) - fallback for display
+            const nestingLevel = task.id?.toString().split('.').length - 1;
             
-            log(`Creating TaskItem for ${task.id}: ${task.title} (status: ${task.status}, collapsible: ${collapsibleState})`);
-            
-            let parentTaskId: string | undefined;
-            if (isSubtask) {
-                // Find the parent task for this subtask
-                const parentTask = tasks.find(mainTask => 
-                    mainTask.subtasks?.some(st => st.id.toString() === task.id.toString())
-                );
-                parentTaskId = parentTask?.id.toString();
-            }
+            log(`Creating TaskItem for ${task.id}: ${task.title} (status: ${task.status}, collapsible: ${collapsibleState}, isSubtask: ${isSubtask}, parentTaskId: ${parentTaskId || 'none'})`);
             
             return new TaskItem(
                 `${task.id}: ${task.title}`,
@@ -1385,10 +1394,13 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
         const priorityOrder = { 'critical': 4, 'high': 3, 'medium': 2, 'low': 1 };
         readyItems.sort((a, b) => {
             // Check if either is a subtask of an in-progress task
-            const aIsSubtaskOfInProgress = a.id.includes('.') && 
+            // Ensure IDs are strings before using .includes()
+            const aIdStr = a.id?.toString() || '';
+            const bIdStr = b.id?.toString() || '';
+            const aIsSubtaskOfInProgress = aIdStr.includes('.') && 
                 tasks.some(task => task.status === 'in-progress' && 
                     task.subtasks?.some(st => st.id === a.id));
-            const bIsSubtaskOfInProgress = b.id.includes('.') && 
+            const bIsSubtaskOfInProgress = bIdStr.includes('.') && 
                 tasks.some(task => task.status === 'in-progress' && 
                     task.subtasks?.some(st => st.id === b.id));
             
@@ -1405,7 +1417,7 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
             let bPriority = priorityOrder[b.priority as keyof typeof priorityOrder] || 2;
             
             // For subtasks, use parent's priority if subtask doesn't have one
-            if (a.id.includes('.') && !a.priority) {
+            if (aIdStr.includes('.') && !a.priority) {
                 const parentTask = tasks.find(task => 
                     task.subtasks?.some(st => st.id === a.id)
                 );
@@ -1414,7 +1426,7 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
                 }
             }
             
-            if (b.id.includes('.') && !b.priority) {
+            if (bIdStr.includes('.') && !b.priority) {
                 const parentTask = tasks.find(task => 
                     task.subtasks?.some(st => st.id === b.id)
                 );
