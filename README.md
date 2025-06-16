@@ -1,6 +1,6 @@
 # Claude Task Master Visual Interface
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://marketplace.visualstudio.com/items?itemName=DevDreed.claude-task-master-extension)
+[![Version](https://img.shields.io/badge/version-1.2.2-blue.svg)](https://marketplace.visualstudio.com/items?itemName=DevDreed.claude-task-master-extension)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![VS Code](https://img.shields.io/badge/VS%20Code-1.70.0+-orange.svg)](https://code.visualstudio.com/)
 [![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen.svg)](TEST_COVERAGE.md)
@@ -14,7 +14,7 @@ A VS Code/Cursor extension that provides a rich visual interface for [task-maste
 
 ## ✨ Features
 
-### 🏷️ **Multi-Context Tag Management** (New in v1.2.0)
+### 🏷️ **Multi-Context Tag Management** (v1.2.0+)
 
 - **Tagged Task System**: Full support for Task Master v0.17.0's tagged format for multi-context project management
 - **Tag Status Bar**: Real-time current tag indicator with click-to-switch functionality
@@ -52,6 +52,14 @@ A VS Code/Cursor extension that provides a rich visual interface for [task-maste
 - **Comprehensive Testing**: 130 tests with 100% pass rate, including full tagged format coverage
 - **Professional Documentation**: Complete setup and usage guides
 - **Enhanced MCP Integration**: Real protocol communication with robust error handling and fallbacks
+
+### 🔧 **Latest Improvements** (v1.2.2)
+
+- **Enhanced Stability**: Improved core extension stability and connection reliability
+- **MCP Client Enhancements**: Better MCP protocol communication and error recovery
+- **Task Provider Optimizations**: Improved task tree rendering and state management
+- **Test Suite Updates**: Enhanced test coverage and reliability with comprehensive validation
+- **Development Tools**: Updated build scripts and improved development installation process
 
 ---
 
@@ -386,7 +394,7 @@ npm run package
 
 The extension has comprehensive test coverage:
 
-- **87 tests** covering all major functionality
+- **130 tests** covering all major functionality
 - **100% pass rate** with robust error handling
 - **Mock frameworks** for isolated testing
 - **Cross-platform** compatibility testing
@@ -495,8 +503,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📊 Project Status
 
-- ✅ **Stable Release**: Version 1.0.0 ready for production use
-- ✅ **Comprehensive Testing**: 87 tests with 100% pass rate
+- ✅ **Current Release**: Version 1.2.2 with enhanced stability and reliability  
+- ✅ **Comprehensive Testing**: 130 tests with 100% pass rate
 - ✅ **Professional Documentation**: Complete setup and usage guides
 - ✅ **Cross-platform Support**: Windows, macOS, Linux
 - ✅ **Active Development**: Regular updates and feature additions
